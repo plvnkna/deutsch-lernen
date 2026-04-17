@@ -420,8 +420,14 @@ function ScannerView({ onBack, user }) {
 function VocabView({ onBack, user }) {
   const [vocab, setVocab] = useState([]);
   const [mode, setMode] = useState("list");
-  const [deck, setDeck] = useState([]);
-  const [cardIndex, setCardIndex] = useState(0);
+  // ── SRS state ──────────────────────────────────────────────────────────────
+  // queue[0] is always the card being shown right now
+  const [queue, setQueue] = useState([]);
+  // snoozed cards waiting to re-enter: [{card, returnAt}]
+  const [snoozed, setSnoozed] = useState([]);
+  // how many cards have been processed (rated) so far this session
+  const [seen, setSeen] = useState(0);
+  // ───────────────────────────────────────────────────────────────────────────
   const [flipped, setFlipped] = useState(false);
   const [filterConf, setFilterConf] = useState("all");
   const [loadingVocab, setLoadingVocab] = useState(true);
@@ -488,34 +494,72 @@ function VocabView({ onBack, user }) {
 
   const startFlash = () => {
     if (filtered.length === 0) return;
-    const cards = filtered.flatMap(v => [
-      { ...v, direction: "de" },
-      { ...v, direction: "ru" },
-    ]).sort(() => Math.random() - 0.5);
-    setDeck(cards);
-    setCardIndex(0);
+    const cards = filtered
+      .flatMap(v => [{ ...v, direction: "de" }, { ...v, direction: "ru" }])
+      .sort(() => Math.random() - 0.5);
+    setQueue(cards);
+    setSnoozed([]);
+    setSeen(0);
     setFlipped(false);
     setMode("flash");
   };
 
   const nextCard = (conf) => {
-    updateConf(deck[cardIndex].word, conf);
-    if (cardIndex + 1 < deck.length) {
-      setCardIndex(i => i + 1);
-      setFlipped(false);
+    const card = queue[0];
+    const remaining = queue.slice(1);   // queue without the current card
+    const newSeen = seen + 1;
+
+    // Persist confidence to vocab list
+    updateConf(card.word, conf);
+
+    let newQueue = [...remaining];
+    let newSnoozed = [...snoozed];
+
+    if (conf === "green") {
+      if (card.returnedFromSnooze) {
+        // Second 🟢 — permanently graduated, do not reinsert
+      } else {
+        // First 🟢 — snooze; re-enter after 50 more cards
+        newSnoozed.push({
+          card: { ...card, returnedFromSnooze: true },
+          returnAt: newSeen + 50,
+        });
+      }
+    } else if (conf === "yellow") {
+      // 🟡 — reinsert 10 positions ahead
+      newQueue.splice(Math.min(10, newQueue.length), 0, card);
     } else {
+      // 🔴 — reinsert 5 positions ahead
+      newQueue.splice(Math.min(5, newQueue.length), 0, card);
+    }
+
+    // Flush any snoozed cards whose delay has now elapsed → append to queue
+    const matured = newSnoozed.filter(s => s.returnAt <= newSeen);
+    newSnoozed = newSnoozed.filter(s => s.returnAt > newSeen);
+    newQueue = [...newQueue, ...matured.map(s => s.card)];
+
+    setQueue(newQueue);
+    setSnoozed(newSnoozed);
+    setSeen(newSeen);
+    setFlipped(false);
+
+    if (newQueue.length === 0 && newSnoozed.length === 0) {
       setMode("done");
     }
   };
 
   // ── FLASHCARD MODE ──
-  if (mode === "flash" && deck.length > 0) {
-    const card = deck[cardIndex];
+  if (mode === "flash" && queue.length > 0) {
+    const card = queue[0];
     const isDeToRu = card.direction === "de";
     const prompt = isDeToRu ? card.word : card.translation;
     const answer = isDeToRu ? card.translation : card.word;
     const promptLabel = isDeToRu ? "🇩🇪 Немецкий" : "🇷🇺 Русский";
     const answerLabel = isDeToRu ? "🇷🇺 Перевод" : "🇩🇪 По-немецки";
+
+    // Total cards still in play = current card (1) + remaining queue + snoozed
+    const totalInPlay = seen + queue.length + snoozed.length;
+    const progressPct = totalInPlay > 0 ? (seen / totalInPlay) * 100 : 0;
 
     return (
       <div style={s.flashWrap}>
@@ -523,12 +567,12 @@ function VocabView({ onBack, user }) {
           <button onClick={() => setMode("list")} style={s.backBtn}>← Стоп</button>
           <div>
             <div style={s.chatTitle}>🃏 Карточки</div>
-            <div style={s.chatSub}>{cardIndex + 1} из {deck.length}</div>
+            <div style={s.chatSub}>{seen + 1} из {totalInPlay}</div>
           </div>
         </div>
         <div style={s.flashBody}>
           <div style={s.progressBar}>
-            <div style={{ ...s.progressFill, width: `${(cardIndex / deck.length) * 100}%` }} />
+            <div style={{ ...s.progressFill, width: `${progressPct}%` }} />
           </div>
           <div style={s.card} onClick={() => setFlipped(f => !f)}>
             <div style={{ fontSize: 12, color: "#aaa", fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>{promptLabel}</div>
