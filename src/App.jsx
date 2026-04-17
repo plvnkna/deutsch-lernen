@@ -486,6 +486,13 @@ function VocabView({ onBack, user }) {
   const [flipped, setFlipped] = useState(false);
   const [filterConf, setFilterConf] = useState("all");
   const [loadingVocab, setLoadingVocab] = useState(true);
+  // ── Add-word modal ──────────────────────────────────────────────────────────
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [addWord, setAddWord] = useState("");
+  const [addTranslation, setAddTranslation] = useState("");
+  const [addExampleDe, setAddExampleDe] = useState("");
+  const [addExampleRu, setAddExampleRu] = useState("");
+  const [addSaving, setAddSaving] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -558,6 +565,50 @@ function VocabView({ onBack, user }) {
     saveVocabLocal(updated);
     if (user) await deleteVocabRemote(user.id, word);
   }, [vocab, user]);
+
+  const saveManualWord = async () => {
+    const word = addWord.trim();
+    const translation = addTranslation.trim();
+    if (!word || !translation) return;
+    setAddSaving(true);
+
+    let exDe = addExampleDe.trim();
+    let exRu = addExampleRu.trim();
+
+    // Auto-generate example sentence if the user left it blank
+    if (!exDe) {
+      const result = await callClaude(
+        [{ role: "user", content: `Generate a simple B1-level German example sentence using the word "${word}". Return JSON only:\n{"example_de":"German sentence","example_ru":"Russian translation of the sentence"}` }],
+        "You are a German-Russian dictionary. Always respond with valid JSON only, no markdown, no extra text."
+      );
+      try {
+        const parsed = JSON.parse(result.replace(/```json|```/g, "").trim());
+        exDe = parsed.example_de || "";
+        exRu = parsed.example_ru || "";
+      } catch { /* leave empty on parse error */ }
+    }
+
+    const entry = { word, translation, example_de: exDe, example_ru: exRu, confidence: null, savedAt: Date.now() };
+
+    // Persist locally first
+    const local = loadVocabLocal();
+    if (!local.find(v => v.word === entry.word)) {
+      saveVocabLocal([entry, ...local]);
+    }
+    // Sync to Supabase
+    if (user) {
+      const ok = await insertVocabRemote(user.id, entry);
+      if (!ok) console.warn("[vocab] remote save failed — word is in localStorage only:", entry.word);
+    }
+
+    // Update UI
+    setVocab(prev => [entry, ...prev.filter(v => v.word !== entry.word)]);
+
+    // Reset form
+    setAddWord(""); setAddTranslation(""); setAddExampleDe(""); setAddExampleRu("");
+    setShowAddModal(false);
+    setAddSaving(false);
+  };
 
   const filtered = filterConf === "all" ? vocab : vocab.filter(v => v.confidence === filterConf);
 
@@ -737,9 +788,10 @@ function VocabView({ onBack, user }) {
         <div style={s.emptyVocab}>
           <div style={{ fontSize: 56 }}>📝</div>
           <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 20, color: "#2d4a22", marginTop: 12 }}>Пока пусто</div>
-          <div style={{ fontSize: 14, color: "#8a9a7e", marginTop: 6, textAlign: "center", lineHeight: 1.6 }}>
+            <div style={{ fontSize: 14, color: "#8a9a7e", marginTop: 6, textAlign: "center", lineHeight: 1.6 }}>
             Нажми на слово в сканере и сохрани его — оно появится здесь
           </div>
+          <button style={s.addWordBtn} onClick={() => setShowAddModal(true)}>+ Добавить слово</button>
         </div>
       ) : (
         <>
@@ -757,9 +809,12 @@ function VocabView({ onBack, user }) {
                 </button>
               ))}
             </div>
-            <button style={s.flashStartBtn} onClick={startFlash} disabled={filtered.length === 0}>
-              🃏 Учить карточки ({filtered.length})
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button style={{ ...s.flashStartBtn, flex: 1 }} onClick={startFlash} disabled={filtered.length === 0}>
+                🃏 Учить карточки ({filtered.length})
+              </button>
+              <button style={s.addWordBtn} onClick={() => setShowAddModal(true)}>+ Слово</button>
+            </div>
           </div>
 
           <div style={s.wordList}>
@@ -783,6 +838,61 @@ function VocabView({ onBack, user }) {
             ))}
           </div>
         </>
+      )}
+
+      {/* ── Add-word modal ── */}
+      {showAddModal && (
+        <div style={s.modalOverlay} onClick={() => !addSaving && setShowAddModal(false)}>
+          <div style={s.modal} onClick={e => e.stopPropagation()}>
+            <div style={s.modalTitle}>Добавить слово</div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={s.addModalLabel}>Немецкое слово</div>
+              <input style={s.modalInput} value={addWord}
+                onChange={e => setAddWord(e.target.value)}
+                placeholder="z.B. der Hund"
+                disabled={addSaving} autoFocus />
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={s.addModalLabel}>Перевод на русский</div>
+              <input style={s.modalInput} value={addTranslation}
+                onChange={e => setAddTranslation(e.target.value)}
+                placeholder="напр. собака"
+                disabled={addSaving} />
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={s.addModalLabel}>Пример на немецком (необязательно)</div>
+              <input style={s.modalInput} value={addExampleDe}
+                onChange={e => setAddExampleDe(e.target.value)}
+                placeholder="Der Hund schläft."
+                disabled={addSaving} />
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <div style={s.addModalLabel}>Перевод примера (необязательно)</div>
+              <input style={s.modalInput} value={addExampleRu}
+                onChange={e => setAddExampleRu(e.target.value)}
+                placeholder="Собака спит."
+                disabled={addSaving} />
+            </div>
+
+            {!addExampleDe.trim() && (
+              <div style={{ fontSize: 12, color: "#8a9a7e", marginTop: -4 }}>
+                ✨ Пример сгенерируется автоматически
+              </div>
+            )}
+
+            <button style={s.modalBtn} onClick={saveManualWord}
+              disabled={addSaving || !addWord.trim() || !addTranslation.trim()}>
+              {addSaving ? "Сохраняю…" : "Сохранить"}
+            </button>
+            <button style={s.modalCancel} onClick={() => setShowAddModal(false)} disabled={addSaving}>
+              Отмена
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1027,6 +1137,8 @@ const s = {
   filterBtn: { background: "#fff", border: "1.5px solid #ddd", borderRadius: 50, padding: "6px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap", color: "#555" },
   filterBtnActive: { background: "#2d4a22", borderColor: "#2d4a22", color: "#fff" },
   flashStartBtn: { background: "linear-gradient(135deg, #3a2d5a, #6a4aaa)", color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
+  addWordBtn: { background: "#fff", color: "#2d4a22", border: "2px solid #4a7c3f", borderRadius: 12, padding: "13px 16px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
+  addModalLabel: { fontSize: 12, fontWeight: 700, color: "#6b7a5e", textTransform: "uppercase", letterSpacing: 0.8 },
   wordList: { flex: 1, overflowY: "auto", padding: "0 16px 32px" },
   wordRow: { display: "flex", alignItems: "center", gap: 10, background: "#fff", borderRadius: 12, padding: "12px 14px", marginBottom: 8, boxShadow: "0 1px 4px rgba(0,0,0,0.06)" },
   confDot: { width: 10, height: 10, borderRadius: "50%", flexShrink: 0 },
