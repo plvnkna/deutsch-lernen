@@ -71,6 +71,61 @@ async function deleteVocabRemote(userId, word) {
   return !error;
 }
 
+// ── SUPABASE FLASH SESSION OPS ───────────────────────────────────────────────
+// Requires a `flash_session` table in Supabase:
+//   CREATE TABLE flash_session (
+//     user_id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+//     queue   jsonb NOT NULL DEFAULT '[]',
+//     snoozed jsonb NOT NULL DEFAULT '[]',
+//     seen    integer NOT NULL DEFAULT 0,
+//     updated_at timestamptz DEFAULT now()
+//   );
+//   ALTER TABLE flash_session ENABLE ROW LEVEL SECURITY;
+//   CREATE POLICY "owner" ON flash_session USING (auth.uid() = user_id);
+async function loadFlashSessionRemote(userId) {
+  const { data, error } = await supabase
+    .from("flash_session")
+    .select("queue, snoozed, seen")
+    .eq("user_id", userId)
+    .single();
+  if (error) {
+    if (error.code === "PGRST116") return null; // no row — not an error
+    console.error("[session] load failed:", error.message);
+    return null;
+  }
+  return data; // { queue, snoozed, seen }
+}
+
+async function saveFlashSessionRemote(userId, queue, snoozed, seen) {
+  const { error } = await supabase
+    .from("flash_session")
+    .upsert(
+      { user_id: userId, queue, snoozed, seen, updated_at: new Date().toISOString() },
+      { onConflict: "user_id" }
+    );
+  if (error) console.error("[session] save failed:", error.message);
+}
+
+async function clearFlashSessionRemote(userId) {
+  const { error } = await supabase
+    .from("flash_session")
+    .delete()
+    .eq("user_id", userId);
+  if (error) console.error("[session] clear failed:", error.message);
+}
+
+// ── LOCAL FLASH SESSION FALLBACK ─────────────────────────────────────────────
+const FLASH_SESSION_KEY = "deutsch_flash_session";
+function loadFlashSessionLocal() {
+  try { return JSON.parse(localStorage.getItem(FLASH_SESSION_KEY)); } catch { return null; }
+}
+function saveFlashSessionLocal(data) {
+  try { localStorage.setItem(FLASH_SESSION_KEY, JSON.stringify(data)); } catch {}
+}
+function clearFlashSessionLocal() {
+  try { localStorage.removeItem(FLASH_SESSION_KEY); } catch {}
+}
+
 // ── CLAUDE API ───────────────────────────────────────────────────────────────
 async function callClaude(messages, system) {
   const response = await fetch("/api/claude", {
@@ -472,6 +527,20 @@ function VocabView({ onBack, user }) {
         setVocab(localList);
       }
 
+      // ── Restore saved flash session (if any) ────────────────────────────────
+      let saved = null;
+      if (user) saved = await loadFlashSessionRemote(user.id);
+      if (!saved) saved = loadFlashSessionLocal();
+
+      if (saved && Array.isArray(saved.queue) && saved.queue.length > 0) {
+        setQueue(saved.queue);
+        setSnoozed(saved.snoozed || []);
+        setSeen(saved.seen || 0);
+        setFlipped(false);
+        setMode("flash");
+      }
+      // ────────────────────────────────────────────────────────────────────────
+
       setLoadingVocab(false);
     })();
   }, [user]);
@@ -497,6 +566,9 @@ function VocabView({ onBack, user }) {
     const cards = filtered
       .flatMap(v => [{ ...v, direction: "de" }, { ...v, direction: "ru" }])
       .sort(() => Math.random() - 0.5);
+    // Starting fresh — clear any previously saved session
+    if (user) clearFlashSessionRemote(user.id);
+    clearFlashSessionLocal();
     setQueue(cards);
     setSnoozed([]);
     setSeen(0);
@@ -544,7 +616,14 @@ function VocabView({ onBack, user }) {
     setFlipped(false);
 
     if (newQueue.length === 0 && newSnoozed.length === 0) {
+      // Session complete — clear the saved state
+      if (user) clearFlashSessionRemote(user.id);
+      clearFlashSessionLocal();
       setMode("done");
+    } else {
+      // Persist session so user can continue after closing the app
+      if (user) saveFlashSessionRemote(user.id, newQueue, newSnoozed, newSeen);
+      saveFlashSessionLocal({ queue: newQueue, snoozed: newSnoozed, seen: newSeen });
     }
   };
 
