@@ -22,63 +22,53 @@ function saveVocabLocal(list) {
 
 // ── SUPABASE VOCAB OPS ────────────────────────────────────────────────────────
 async function loadVocabRemote(userId) {
-  try {
-    const { data, error } = await supabase
-      .from("vocab")
-      .select("*")
-      .eq("user_id", userId)
-      .order("saved_at", { ascending: false });
-    if (error) throw error;
-    return data || [];
-  } catch {
-    return loadVocabLocal();
+  const { data, error } = await supabase
+    .from("vocab")
+    .select("*")
+    .eq("user_id", userId)
+    .order("saved_at", { ascending: false });
+  if (error) {
+    console.error("[vocab] load failed:", error.message, error);
+    throw error;                // let the caller decide the fallback
   }
+  return data || [];
 }
 
 async function insertVocabRemote(userId, entry) {
-  try {
-    const { error } = await supabase.from("vocab").insert({
-      user_id: userId,
-      word: entry.word,
-      translation: entry.translation,
-      example_de: entry.example_de || "",
-      example_ru: entry.example_ru || "",
-      confidence: entry.confidence ?? null,
-      saved_at: new Date(entry.savedAt || Date.now()).toISOString(),
-    });
-    if (error) throw error;
-    return true;
-  } catch {
+  const { error } = await supabase.from("vocab").insert({
+    user_id: userId,
+    word: entry.word,
+    translation: entry.translation,
+    example_de: entry.example_de || "",
+    example_ru: entry.example_ru || "",
+    confidence: entry.confidence ?? null,
+    saved_at: new Date(entry.savedAt || Date.now()).toISOString(),
+  });
+  if (error) {
+    console.error("[vocab] insert failed:", error.message, error);
     return false;
   }
+  return true;
 }
 
 async function updateConfidenceRemote(userId, word, confidence) {
-  try {
-    const { error } = await supabase
-      .from("vocab")
-      .update({ confidence })
-      .eq("word", word)
-      .eq("user_id", userId);
-    if (error) throw error;
-    return true;
-  } catch {
-    return false;
-  }
+  const { error } = await supabase
+    .from("vocab")
+    .update({ confidence })
+    .eq("word", word)
+    .eq("user_id", userId);
+  if (error) console.error("[vocab] update confidence failed:", error.message, error);
+  return !error;
 }
 
 async function deleteVocabRemote(userId, word) {
-  try {
-    const { error } = await supabase
-      .from("vocab")
-      .delete()
-      .eq("word", word)
-      .eq("user_id", userId);
-    if (error) throw error;
-    return true;
-  } catch {
-    return false;
-  }
+  const { error } = await supabase
+    .from("vocab")
+    .delete()
+    .eq("word", word)
+    .eq("user_id", userId);
+  if (error) console.error("[vocab] delete failed:", error.message, error);
+  return !error;
 }
 
 // ── CLAUDE API ───────────────────────────────────────────────────────────────
@@ -340,12 +330,16 @@ function ScannerView({ onBack, user }) {
   const saveWord = async () => {
     if (!translation) return;
     const entry = { ...translation, confidence: null, savedAt: Date.now() };
-    // Optimistic local update
+    // Always persist locally first (offline fallback)
     const local = loadVocabLocal();
     if (!local.find(v => v.word === entry.word)) {
       saveVocabLocal([entry, ...local]);
     }
-    if (user) await insertVocabRemote(user.id, entry);
+    // Sync to Supabase and log if it fails
+    if (user) {
+      const ok = await insertVocabRemote(user.id, entry);
+      if (!ok) console.warn("[vocab] remote save failed — word is in localStorage only:", entry.word);
+    }
     setSaved(true);
   };
 
@@ -435,12 +429,43 @@ function VocabView({ onBack, user }) {
   useEffect(() => {
     (async () => {
       setLoadingVocab(true);
+      const localList = loadVocabLocal();
+
       if (user) {
-        const remote = await loadVocabRemote(user.id);
-        setVocab(remote.map(v => ({ ...v, savedAt: v.savedAt ?? new Date(v.saved_at).getTime() })));
+        let remoteList = [];
+        try {
+          remoteList = await loadVocabRemote(user.id);
+        } catch (err) {
+          // Supabase unreachable — fall back to localStorage entirely
+          console.warn("[vocab] falling back to localStorage:", err.message);
+          setVocab(localList);
+          setLoadingVocab(false);
+          return;
+        }
+
+        // Find words saved locally that never made it to Supabase
+        const remoteWords = new Set(remoteList.map(v => v.word));
+        const pendingLocal = localList.filter(v => !remoteWords.has(v.word));
+
+        if (pendingLocal.length > 0) {
+          console.log("[vocab] syncing", pendingLocal.length, "local-only word(s) to Supabase");
+          await Promise.all(pendingLocal.map(e => insertVocabRemote(user.id, e)));
+          // Re-fetch after sync so we have the canonical remote list
+          try { remoteList = await loadVocabRemote(user.id); } catch { /* keep what we have */ }
+        }
+
+        // Merge: show remote words + any local-only words that still failed to sync
+        const finalRemoteWords = new Set(remoteList.map(v => v.word));
+        const stillLocal = localList.filter(v => !finalRemoteWords.has(v.word));
+        const merged = [
+          ...remoteList.map(v => ({ ...v, savedAt: v.savedAt ?? new Date(v.saved_at).getTime() })),
+          ...stillLocal,
+        ];
+        setVocab(merged);
       } else {
-        setVocab(loadVocabLocal());
+        setVocab(localList);
       }
+
       setLoadingVocab(false);
     })();
   }, [user]);
