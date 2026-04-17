@@ -83,7 +83,7 @@ async function deleteVocabRemote(userId, word) {
 
 // ── CLAUDE API ───────────────────────────────────────────────────────────────
 async function callClaude(messages, system) {
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -295,7 +295,7 @@ function ScannerView({ onBack, user }) {
     reader.onload = async () => {
       const base64 = reader.result.split(",")[1];
       const mediaType = file.type || "image/jpeg";
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const response = await fetch("/api/claude", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
