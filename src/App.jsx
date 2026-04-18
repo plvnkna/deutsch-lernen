@@ -126,6 +126,17 @@ function clearFlashSessionLocal() {
   try { localStorage.removeItem(FLASH_SESSION_KEY); } catch {}
 }
 
+// ── HELPERS ──────────────────────────────────────────────────────────────────
+// Split an AI message into saveable German sentences (strips 💡 hint lines)
+function extractGermanSentences(content) {
+  const germanText = content
+    .split("\n")
+    .filter(line => !line.trim().startsWith("💡"))
+    .join(" ");
+  const raw = germanText.match(/[^.!?]+[.!?]+/g) || [];
+  return raw.map(s => s.trim()).filter(s => s.length > 8);
+}
+
 // ── CLAUDE API ───────────────────────────────────────────────────────────────
 async function callClaude(messages, system) {
   const response = await fetch("/api/claude", {
@@ -224,12 +235,20 @@ function UserAvatar({ user, onSignOut }) {
 }
 
 // ── CHAT VIEW ────────────────────────────────────────────────────────────────
-function ChatView({ topic, onBack }) {
+function ChatView({ topic, onBack, user }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [started, setStarted] = useState(false);
   const bottomRef = useRef(null);
+  // ── Save-sentence modal ─────────────────────────────────────────────────────
+  const [saveModal, setSaveModal] = useState(null);   // null | { content }
+  const [selectedSentence, setSelectedSentence] = useState("");
+  const [sentenceDe, setSentenceDe] = useState("");
+  const [sentenceRu, setSentenceRu] = useState("");
+  const [translatingS, setTranslatingS] = useState(false);
+  const [sentenceSaving, setSentenceSaving] = useState(false);
+  const [sentenceSaved, setSentenceSaved] = useState(false);
 
   const systemPrompt = `Du bist ein freundlicher Deutschlehrer für russischsprachige Anfänger (Niveau B1).
 Das Thema des Gesprächs ist: "${topic.de}" (auf Russisch: "${topic.ru}").
@@ -274,6 +293,59 @@ Regeln:
     );
   };
 
+  const openSaveModal = (content) => {
+    setSaveModal({ content });
+    setSelectedSentence("");
+    setSentenceDe("");
+    setSentenceRu("");
+    setSentenceSaved(false);
+    setSentenceSaving(false);
+  };
+
+  const selectSentence = async (sentence) => {
+    setSelectedSentence(sentence);
+    setSentenceDe(sentence);
+    setSentenceRu("");
+    setTranslatingS(true);
+    const result = await callClaude(
+      [{ role: "user", content: `Translate this German sentence to Russian. Return JSON only:\n{"translation":"Russian translation"}\n\nSentence: "${sentence}"` }],
+      "You are a German-Russian translator. Always respond with valid JSON only, no markdown, no extra text."
+    );
+    try {
+      const parsed = JSON.parse(result.replace(/```json|```/g, "").trim());
+      setSentenceRu(parsed.translation || result.trim());
+    } catch {
+      setSentenceRu(result.trim());
+    }
+    setTranslatingS(false);
+  };
+
+  const saveSentenceCard = async () => {
+    if (!sentenceDe.trim() || !sentenceRu.trim()) return;
+    setSentenceSaving(true);
+    const entry = {
+      word: sentenceDe.trim(),
+      translation: sentenceRu.trim(),
+      example_de: "",
+      example_ru: "",
+      confidence: null,
+      savedAt: Date.now(),
+    };
+    // Save locally first
+    const local = loadVocabLocal();
+    if (!local.find(v => v.word === entry.word)) {
+      saveVocabLocal([entry, ...local]);
+    }
+    // Sync to Supabase
+    if (user) {
+      const ok = await insertVocabRemote(user.id, entry);
+      if (!ok) console.warn("[vocab] remote save failed:", entry.word);
+    }
+    setSentenceSaved(true);
+    setSentenceSaving(false);
+    setTimeout(() => setSaveModal(null), 900);
+  };
+
   return (
     <div style={s.chatWrap}>
       <div style={s.chatHeader}>
@@ -293,11 +365,19 @@ Regeln:
           </div>
         ) : (
           <>
-            {messages.map((m, i) => (
-              <div key={i} style={m.role === "user" ? s.userBubble : s.aiBubble}>
-                {renderMsg(m.content)}
-              </div>
-            ))}
+            {messages.map((m, i) =>
+              m.role === "user" ? (
+                <div key={i} style={s.userBubble}>{renderMsg(m.content)}</div>
+              ) : (
+                <div key={i} style={{ position: "relative", alignSelf: "flex-start", maxWidth: "85%" }}>
+                  <div style={{ ...s.aiBubble, alignSelf: "unset", maxWidth: "unset" }}>
+                    {renderMsg(m.content)}
+                  </div>
+                  <button style={s.bookmarkBtn} onClick={() => openSaveModal(m.content)}
+                    title="Сохранить фразу в словарик">🔖</button>
+                </div>
+              )
+            )}
             {loading && (
               <div style={s.aiBubble}>
                 <span style={{ display: "inline-flex", gap: 4 }}>
@@ -316,6 +396,61 @@ Regeln:
           <input style={s.textInput} value={input} onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && send()} placeholder="Schreib auf Deutsch…" disabled={loading} />
           <button onClick={send} style={s.sendBtn} disabled={loading || !input.trim()}>➤</button>
+        </div>
+      )}
+
+      {/* ── Save-sentence modal ── */}
+      {saveModal && (
+        <div style={s.modalOverlay} onClick={() => !sentenceSaving && setSaveModal(null)}>
+          <div style={s.modal} onClick={e => e.stopPropagation()}>
+            {!selectedSentence ? (
+              /* Phase 1 — pick a sentence */
+              <>
+                <div style={s.modalTitle}>Сохранить фразу 🔖</div>
+                <div style={{ fontSize: 13, color: "#8a9a7e" }}>Выбери предложение для карточки:</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 280, overflowY: "auto" }}>
+                  {extractGermanSentences(saveModal.content).length > 0
+                    ? extractGermanSentences(saveModal.content).map((sentence, i) => (
+                        <button key={i} style={s.sentenceChip} onClick={() => selectSentence(sentence)}>
+                          {sentence}
+                        </button>
+                      ))
+                    : <div style={{ fontSize: 14, color: "#aaa", padding: 8 }}>Нет предложений для сохранения</div>
+                  }
+                </div>
+                <button style={s.modalCancel} onClick={() => setSaveModal(null)}>Отмена</button>
+              </>
+            ) : (
+              /* Phase 2 — edit fields and save */
+              <>
+                <div style={s.modalTitle}>Сохранить фразу 🔖</div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={s.addModalLabel}>Немецкий</div>
+                  <textarea style={s.sentenceTextarea} value={sentenceDe}
+                    onChange={e => setSentenceDe(e.target.value)} disabled={sentenceSaving} />
+                </div>
+
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={s.addModalLabel}>Перевод</div>
+                  {translatingS
+                    ? <div style={{ padding: "10px 0", fontSize: 14, color: "#8a9a7e" }}>Перевожу…</div>
+                    : <textarea style={s.sentenceTextarea} value={sentenceRu}
+                        onChange={e => setSentenceRu(e.target.value)} disabled={sentenceSaving} />
+                  }
+                </div>
+
+                <button style={s.modalBtn} onClick={saveSentenceCard}
+                  disabled={sentenceSaving || translatingS || !sentenceDe.trim() || !sentenceRu.trim()}>
+                  {sentenceSaved ? "✓ Сохранено!" : sentenceSaving ? "Сохраняю…" : "Сохранить в словарик"}
+                </button>
+                <button style={s.modalCancel}
+                  onClick={() => setSelectedSentence("")} disabled={sentenceSaving}>
+                  ← Другое предложение
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -706,13 +841,13 @@ function VocabView({ onBack, user }) {
           </div>
           <div style={s.card} onClick={() => setFlipped(f => !f)}>
             <div style={{ fontSize: 12, color: "#aaa", fontWeight: 600, textTransform: "uppercase", letterSpacing: 1 }}>{promptLabel}</div>
-            <div style={s.cardWord}>{prompt}</div>
+            <div style={{ ...s.cardWord, fontSize: prompt.length > 30 ? (prompt.length > 60 ? 16 : 22) : 36 }}>{prompt}</div>
             {!flipped ? (
               <div style={s.cardHint}>Нажми чтобы увидеть {isDeToRu ? "перевод" : "немецкое слово"}</div>
             ) : (
               <>
                 <div style={{ fontSize: 11, color: "#aaa", fontWeight: 600, textTransform: "uppercase", letterSpacing: 1, marginTop: 8 }}>{answerLabel}</div>
-                <div style={s.cardTranslation}>{answer}</div>
+                <div style={{ ...s.cardTranslation, fontSize: answer.length > 30 ? (answer.length > 60 ? 14 : 18) : 26 }}>{answer}</div>
                 {isDeToRu && card.example_de && (
                   <div style={s.cardExample}>
                     <div style={{ fontSize: 13, color: "#6b7a5e", fontStyle: "italic" }}>{card.example_de}</div>
@@ -822,8 +957,8 @@ function VocabView({ onBack, user }) {
               <div key={v.word} style={s.wordRow}>
                 <div style={{ ...s.confDot, background: v.confidence === "red" ? "#e74c3c" : v.confidence === "yellow" ? "#d4a017" : v.confidence === "green" ? "#4a7c3f" : "#ccc" }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={s.wordDe}>{v.word}</div>
-                  <div style={s.wordRu}>{v.translation}</div>
+                  <div style={{ ...s.wordDe, fontSize: v.word.length > 25 ? 13 : 16, lineHeight: 1.4 }}>{v.word}</div>
+                  <div style={{ ...s.wordRu, fontSize: v.translation.length > 35 ? 11 : 13 }}>{v.translation}</div>
                 </div>
                 <div style={s.wordActions}>
                   {["red", "yellow", "green"].map(c => (
@@ -946,7 +1081,7 @@ export default function App() {
 
   const user = session.user;
 
-  if (screen === "chat") return <ChatView topic={activeTopic} onBack={() => setScreen("home")} />;
+  if (screen === "chat") return <ChatView topic={activeTopic} onBack={() => setScreen("home")} user={user} />;
   if (screen === "scanner") return <ScannerView onBack={() => setScreen("home")} user={user} />;
   if (screen === "vocab") return <VocabView onBack={() => setScreen("home")} user={user} />;
 
@@ -1139,6 +1274,9 @@ const s = {
   flashStartBtn: { background: "linear-gradient(135deg, #3a2d5a, #6a4aaa)", color: "#fff", border: "none", borderRadius: 12, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer" },
   addWordBtn: { background: "#fff", color: "#2d4a22", border: "2px solid #4a7c3f", borderRadius: 12, padding: "13px 16px", fontSize: 14, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
   addModalLabel: { fontSize: 12, fontWeight: 700, color: "#6b7a5e", textTransform: "uppercase", letterSpacing: 0.8 },
+  bookmarkBtn: { position: "absolute", bottom: 6, right: 8, background: "rgba(255,255,255,0.85)", border: "none", borderRadius: 6, padding: "2px 6px", fontSize: 13, cursor: "pointer", opacity: 0.65, lineHeight: 1.4 },
+  sentenceChip: { background: "#f5f0e8", border: "1.5px solid #d0cdc4", borderRadius: 10, padding: "10px 14px", fontSize: 14, color: "#2d2d2d", cursor: "pointer", textAlign: "left", lineHeight: 1.5, fontFamily: "'Nunito', sans-serif" },
+  sentenceTextarea: { border: "1.5px solid #c8d4c0", borderRadius: 12, padding: "10px 14px", fontSize: 14, fontFamily: "'Nunito', sans-serif", outline: "none", color: "#2d2d2d", resize: "none", minHeight: 64, lineHeight: 1.5 },
   wordList: { flex: 1, overflowY: "auto", padding: "0 16px 32px" },
   wordRow: { display: "flex", alignItems: "center", gap: 10, background: "#fff", borderRadius: 12, padding: "12px 14px", marginBottom: 8, boxShadow: "0 1px 4px rgba(0,0,0,0.06)" },
   confDot: { width: 10, height: 10, borderRadius: "50%", flexShrink: 0 },
