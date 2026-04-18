@@ -10,6 +10,7 @@ const TOPICS = [
   { id: "weather", de: "Über das Wetter", ru: "О погоде", emoji: "🌤️" },
   { id: "pharmacy", de: "In der Apotheke", ru: "В аптеке", emoji: "💊" },
   { id: "bank", de: "Auf der Bank", ru: "В банке", emoji: "🏦" },
+  { id: "jobinterview", de: "Vorstellungsgespräch", ru: "Собеседование на работу", emoji: "💼" },
 ];
 
 // ── LOCAL STORAGE FALLBACK ────────────────────────────────────────────────────
@@ -250,7 +251,16 @@ function ChatView({ topic, onBack, user }) {
   const [sentenceSaving, setSentenceSaving] = useState(false);
   const [sentenceSaved, setSentenceSaved] = useState(false);
 
-  const systemPrompt = `Du bist ein freundlicher Deutschlehrer für russischsprachige Anfänger (Niveau B1).
+  const systemPrompt = topic.id === "jobinterview"
+    ? `Du bist ein erfahrener HR-Manager einer deutschen Firma und führst ein Vorstellungsgespräch für eine typische Bürostelle (z.B. Sachbearbeiter, Bürokaufmann/-frau).
+Deine Aufgabe:
+1. Stelle realistische Interviewfragen auf Deutsch (B1-Niveau): z.B. "Erzählen Sie etwas über sich.", "Warum möchten Sie bei uns arbeiten?", "Was sind Ihre Stärken und Schwächen?", "Wo sehen Sie sich in fünf Jahren?"
+2. Reagiere auf die Antworten des Nutzers auf Deutsch — kurz und professionell.
+3. Gib nach jeder Antwort auf Russisch konstruktives Feedback mit Präfix "💡 Обратная связь:" — was gut war, was man verbessern kann, ob die Grammatik korrekt war.
+4. Sei ermutigend, aber realistisch — wie ein echter, wohlwollender Interviewer.
+5. Stelle immer nur eine Frage auf einmal.
+6. Wenn der Nutzer auf Russisch antwortet, erinnere ihn freundlich auf Russisch daran, dass das Gespräch auf Deutsch geführt werden soll, und wiederhole die Frage.`
+    : `Du bist ein freundlicher Deutschlehrer für russischsprachige Anfänger (Niveau B1).
 Das Thema des Gesprächs ist: "${topic.de}" (auf Russisch: "${topic.ru}").
 Regeln:
 1. Führe ein natürliches Gespräch auf Deutsch über das gewählte Thema.
@@ -262,8 +272,11 @@ Regeln:
   const startConversation = async () => {
     setStarted(true);
     setLoading(true);
+    const openerPrompt = topic.id === "jobinterview"
+      ? "Begrüße den Bewerber professionell und stelle dich kurz vor. Dann stelle die erste Interviewfrage."
+      : `Beginne das Gespräch über das Thema: ${topic.de}`;
     const opener = await callClaude(
-      [{ role: "user", content: `Beginne das Gespräch über das Thema: ${topic.de}` }],
+      [{ role: "user", content: openerPrompt }],
       systemPrompt
     );
     setMessages([{ role: "assistant", content: opener }]);
@@ -285,9 +298,9 @@ Regeln:
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
 
   const renderMsg = (content) => {
-    const parts = content.split(/(💡 Подсказка:[^\n]+)/g);
+    const parts = content.split(/(💡 (?:Подсказка|Обратная связь):[^\n]+)/g);
     return parts.map((part, i) =>
-      part.startsWith("💡 Подсказка:") ? (
+      part.startsWith("💡 Подсказка:") || part.startsWith("💡 Обратная связь:") ? (
         <div key={i} style={s.hint}>{part}</div>
       ) : <span key={i}>{part}</span>
     );
