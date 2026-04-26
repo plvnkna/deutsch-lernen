@@ -150,6 +150,10 @@ async function callClaude(messages, system) {
       messages,
     }),
   });
+  if (!response.ok) {
+    const err = await response.text().catch(() => response.status);
+    throw new Error(`Claude API error ${response.status}: ${err}`);
+  }
   const data = await response.json();
   return data.content?.[0]?.text || "";
 }
@@ -720,42 +724,57 @@ function VocabView({ onBack, user }) {
     if (!word || !translation) return;
     setAddSaving(true);
 
-    let exDe = addExampleDe.trim();
-    let exRu = addExampleRu.trim();
+    try {
+      let exDe = addExampleDe.trim();
+      let exRu = addExampleRu.trim();
 
-    // Auto-generate example sentence if the user left it blank
-    if (!exDe) {
-      const result = await callClaude(
-        [{ role: "user", content: `Generate a simple B1-level German example sentence using the word "${word}". Return JSON only:\n{"example_de":"German sentence","example_ru":"Russian translation of the sentence"}` }],
-        "You are a German-Russian dictionary. Always respond with valid JSON only, no markdown, no extra text."
-      );
-      try {
-        const parsed = JSON.parse(result.replace(/```json|```/g, "").trim());
-        exDe = parsed.example_de || "";
-        exRu = parsed.example_ru || "";
-      } catch { /* leave empty on parse error */ }
+      // Auto-generate example sentence if the user left it blank.
+      // Wrapped in its own try-catch so a Claude API failure never
+      // blocks the save — we just continue without an example.
+      if (!exDe) {
+        try {
+          const result = await callClaude(
+            [{ role: "user", content: `Generate a simple B1-level German example sentence using the word "${word}". Return JSON only:\n{"example_de":"German sentence","example_ru":"Russian translation of the sentence"}` }],
+            "You are a German-Russian dictionary. Always respond with valid JSON only, no markdown, no extra text."
+          );
+          const parsed = JSON.parse(result.replace(/```json|```/g, "").trim());
+          exDe = parsed.example_de || "";
+          exRu = parsed.example_ru || "";
+        } catch (err) {
+          console.warn("[vocab] example auto-generation failed, saving without example:", err.message);
+        }
+      }
+
+      const entry = { word, translation, example_de: exDe, example_ru: exRu, confidence: null, savedAt: Date.now() };
+
+      // Persist locally first (works offline)
+      const local = loadVocabLocal();
+      if (!local.find(v => v.word === entry.word)) {
+        saveVocabLocal([entry, ...local]);
+      }
+
+      // Sync to Supabase
+      if (user) {
+        console.log("[vocab] inserting manual word for user:", user.id, entry.word);
+        const ok = await insertVocabRemote(user.id, entry);
+        if (!ok) console.warn("[vocab] remote save failed — word is in localStorage only:", entry.word);
+        else console.log("[vocab] remote save OK:", entry.word);
+      } else {
+        console.warn("[vocab] no user session — saving to localStorage only");
+      }
+
+      // Update UI immediately (optimistic)
+      setVocab(prev => [entry, ...prev.filter(v => v.word !== entry.word)]);
+
+      // Reset form and close modal
+      setAddWord(""); setAddTranslation(""); setAddExampleDe(""); setAddExampleRu("");
+      setShowAddModal(false);
+    } catch (err) {
+      // Catch-all so the button never stays stuck
+      console.error("[vocab] saveManualWord unexpected error:", err.message, err);
+    } finally {
+      setAddSaving(false);
     }
-
-    const entry = { word, translation, example_de: exDe, example_ru: exRu, confidence: null, savedAt: Date.now() };
-
-    // Persist locally first
-    const local = loadVocabLocal();
-    if (!local.find(v => v.word === entry.word)) {
-      saveVocabLocal([entry, ...local]);
-    }
-    // Sync to Supabase
-    if (user) {
-      const ok = await insertVocabRemote(user.id, entry);
-      if (!ok) console.warn("[vocab] remote save failed — word is in localStorage only:", entry.word);
-    }
-
-    // Update UI
-    setVocab(prev => [entry, ...prev.filter(v => v.word !== entry.word)]);
-
-    // Reset form
-    setAddWord(""); setAddTranslation(""); setAddExampleDe(""); setAddExampleRu("");
-    setShowAddModal(false);
-    setAddSaving(false);
   };
 
   const filtered = filterConf === "all" ? vocab : vocab.filter(v => v.confidence === filterConf);
